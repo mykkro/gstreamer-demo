@@ -1,0 +1,18 @@
+[package]
+name = "sim-streamer"
+version = "0.1.0"
+edition = "2024"
+description = "Headless wgpu-rendered 3D scene, several vehicle cameras streamed as H.265 channels"
+license = "MIT"
+publish = false
+
+[dependencies]
+gst-demo = { path = ".." }
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+glam = { version = "0.34", features = ["bytemuck"] }
+gst = { package = "gstreamer", version = "0.25" }
+gst-app = { package = "gstreamer-app", version = "0.25" }
+pollster = "1"
+wgpu = "30"

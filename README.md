@@ -12,7 +12,8 @@ a Rust producer with Python receivers, or the other way round.
 gstreamer-demo/
 ├── README.md
 ├── python/            producer.py, receiver.py, common.py, requirements.txt
-├── rust/              Cargo.toml, env.ps1, src/lib.rs, src/bin/{producer,receiver}.rs
+├── rust/              Cargo workspace: src/lib.rs, src/bin/{producer,receiver}.rs, env.cmd/env.ps1
+│   └── sim-streamer/  headless 3D scene (wgpu) → 6 vehicle cameras streamed as H.265 channels
 ├── web/webrtc/        browser viewing via WebRTC (Python gateway + page)
 ├── web/h265-webcodecs/ browser viewing of the original H.265 via Node.js + WebCodecs
 └── .venv/             Python virtual env (created in step 1)
@@ -167,6 +168,13 @@ The pip wheels don't include those, so install the official SDK:
    # or: cargo run --release --bin receiver -- --channel 720p30
    ```
 
+`cargo build --release` builds all three binaries of the workspace: `producer`, `receiver`, and `sim-streamer`.
+
+**3D rendering → streams:** [rust/sim-streamer](rust/sim-streamer/) renders a synthetic city headlessly with
+`wgpu` and streams 6 vehicle cameras plus a mosaic as H.265 channels. Every receiver here works with it. Its
+[README](rust/sim-streamer/README.md) also discusses the architecture and performance of streaming views from a
+game engine.
+
 The command-line options are the same as the Python scripts (`--channels`, `--encoder`, `--gop-seconds`,
 `--always-encode`, `--host`, `--decoder`, `--no-window`, `--duration`, …). See `--help`.
 
@@ -317,7 +325,8 @@ Static content (screens, cameras) needs much less than motion-heavy content.
 | [python/requirements.txt](python/requirements.txt) | `gstreamer-bundle`, `opencv-python`, `numpy` |
 | [rust/src/bin/producer.rs](rust/src/bin/producer.rs) | Rust port of the producer (same pipeline and protocol) |
 | [rust/src/bin/receiver.rs](rust/src/bin/receiver.rs) | Rust receiver, native GStreamer video window |
-| [rust/src/lib.rs](rust/src/lib.rs) | shared `Channel` type + control request helper |
+| [rust/src/lib.rs](rust/src/lib.rs) | shared: `Channel` type, control protocol (client and server), encoder settings, encode-on-demand channel wiring |
+| [rust/sim-streamer/](rust/sim-streamer/) | headless `wgpu` renderer → `appsrc` → per-camera and mosaic H.265 channels ([README](rust/sim-streamer/README.md)) |
 | [web/webrtc/webrtc_gateway.py](web/webrtc/webrtc_gateway.py) | WebRTC gateway (`webrtcsink` + built-in signalling and web server) |
 | [web/webrtc/www/index.html](web/webrtc/www/index.html) | WebRTC viewer page |
 | [web/h265-webcodecs/server.js](web/h265-webcodecs/server.js) | Node relay: producer H.265 → WebSocket fan-out with GOP cache |
