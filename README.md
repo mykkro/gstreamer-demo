@@ -243,6 +243,9 @@ node server.js                            # terminal 2
   so the picture appears immediately instead of after up to one keyframe interval (2 s).
 - **Slow viewers:** if a viewer's WebSocket backlog grows above 4 MB, that viewer skips frames until the next
   keyframe. Other viewers aren't affected.
+- **Live channel list:** the relay keeps a `watch` connection to the producer and forwards channel changes to
+  the page as Server-Sent Events (`/api/events`). With a producer that supports it (bevy-streamer), the page
+  can also add and remove cameras (`POST /api/cameras`, `DELETE /api/cameras/<name>`).
 - The browser page reads the codec string (e.g. `hev1.1.6.L120.90`) from the stream, checks
   `VideoDecoder.isConfigSupported()`, decodes on the GPU, and draws to a `<canvas>`.
 - **Other machines:** WebCodecs only works in a *secure context*. `http://localhost` counts as one, but
@@ -261,7 +264,17 @@ Newline-delimited JSON over TCP (port 5000). Both implementations speak it ([pyt
       "port": 5002, "codec": "h265", "container": "mpegts", "transport": "tcp", "encoder": "nvh265enc"}, ...]}
 → {"cmd": "stats"}
 ← {"ok": true, "clients": {"1080p30": 0, "720p30": 2, "480p15": 1}}
+→ {"cmd": "watch"}
+← the "list" reply + "watching": true, then one line per change (connection stays open):
+  {"event": "channel_added", "channel": {...}}
+  {"event": "channel_removed", "id": "dronecam_3"}
 ```
+
+Producers whose cameras can change at runtime (`bevy-streamer`) also accept `add_camera` /
+`remove_camera`; see the [bevy-streamer README](rust/bevy-streamer/README.md#dynamic-cameras).
+[python/camctl.py](python/camctl.py) is a small command-line client for all of it
+(`list`, `watch`, `add`, `remove`). It needs only plain Python, no GStreamer. The Python and Rust receivers and
+the WebCodecs viewer use `watch` to keep their channel lists current.
 
 ## 6. How it scales to many subscribers
 
@@ -269,7 +282,9 @@ Newline-delimited JSON over TCP (port 5000). Both implementations speak it ([pyt
   is encoded once. `tcpserversink` then sends the same encoded bytes to every connected client. Ten viewers
   of `720p30` cost one encoder plus network bandwidth, not ten encoders.
 - **Encode on demand.** Each channel has a `valve` that stays closed until its first subscriber connects
-  and closes again when the last one leaves. Channels nobody watches cost no scaling or encoding.
+  and closes again when the last one leaves. Channels nobody watches cost no scaling or encoding. The Rust
+  producers also stop the idle encoder element, which releases its hardware encoder session (NVENC keeps
+  a session open while the encoder runs, even without input).
 - **Fast join.** When a client connects, the producer asks the encoder for an immediate IDR frame
   (force-key-unit event). `h265parse config-interval=-1` re-sends VPS/SPS/PPS before every keyframe, so a
   late joiner can start decoding right away instead of waiting for the next GOP.
@@ -324,7 +339,8 @@ Static content (screens, cameras) needs much less than motion-heavy content.
 | file | purpose |
 |---|---|
 | [python/producer.py](python/producer.py) | source → tee → per-channel H.265 encode → TCP servers, plus the control server |
-| [python/receiver.py](python/receiver.py) | queries channels, subscribes, decodes, shows frames with OpenCV |
+| [python/receiver.py](python/receiver.py) | queries channels, subscribes, decodes, shows frames with OpenCV; follows channel changes |
+| [python/camctl.py](python/camctl.py) | control-protocol CLI: list, watch, add/remove cameras (no GStreamer needed) |
 | [python/common.py](python/common.py) | GStreamer init + the JSON control request helper |
 | [python/requirements.txt](python/requirements.txt) | `gstreamer-bundle`, `opencv-python`, `numpy` |
 | [rust/src/bin/producer.rs](rust/src/bin/producer.rs) | Rust port of the producer (same pipeline and protocol) |

@@ -11,7 +11,16 @@
   main { max-width: 1280px; margin: 0 auto; padding: 16px; }
   h1 { font-size: 18px; margin: 0 0 12px; }
   .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-  select { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid #8884; background: var(--card); color: var(--fg); }
+  select, input, button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid #8884; background: var(--card); color: var(--fg); }
+  input { width: 9em; }
+  input[type=number] { width: 5em; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); }
+  .form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .form label { display: flex; gap: 4px; align-items: center; color: var(--muted); }
+  #log { color: var(--muted); font-size: 13px; margin-top: 8px; max-height: 8em; overflow: auto; }
   canvas { width: 100%; background: #000; border-radius: 8px; aspect-ratio: 16 / 9; display: block; }
   #stats { color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 8px; min-height: 1.4em; }
   #status { color: var(--muted); }
@@ -23,10 +32,24 @@
   <h1>GStreamer demo · H.265 via WebCodecs</h1>
   <div class="bar">
     <select id="channels"></select>
+    <button id="remove" title="Remove this camera from the producer">Remove camera</button>
     <span id="status">loading…</span>
   </div>
   <canvas id="canvas" width="1280" height="720"></canvas>
   <div id="stats"></div>
+  <details id="addpanel">
+    <summary>Add a camera (producers with dynamic cameras, e.g. bevy-streamer)</summary>
+    <div class="form">
+      <label>name <input id="cam-name" placeholder="cctv1" pattern="[a-z0-9_]{1,24}"></label>
+      <label>attach <select id="cam-attach"></select></label>
+      <label>look at <select id="cam-look"></select></label>
+      <label>size <select id="cam-size"><option>640x360</option><option>960x540</option><option>1280x720</option><option>512x512</option></select></label>
+      <label>fps <select id="cam-fps"><option>30</option><option selected>15</option><option>10</option><option>5</option></select></label>
+      <label>lifetime s <input id="cam-life" type="number" min="0" placeholder="∞"></label>
+      <button id="cam-add">Add</button>
+    </div>
+  </details>
+  <div id="log"></div>
 </main>
 <script>
 // Receives the producer's original H.265 access units (Annex B) over a WebSocket and decodes
@@ -40,18 +63,56 @@ let stat = { frames: 0, bytes: 0, dropped: 0, t0: performance.now(), fps: 0, kbp
 
 function status(text, bad = false) { $("status").textContent = text; $("status").className = bad ? "bad" : ""; }
 
+function log(text) {
+  const line = document.createElement("div");
+  line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+  $("log").prepend(line);
+}
+
+/** (Re)load the channel list. Keeps the current channel if it still exists; reconnects only if needed. */
 async function loadChannels() {
   const res = await fetch("/api/channels");
   const info = await res.json();
   if (!info.ok) { status(info.error, true); setTimeout(loadChannels, 2000); return; }
   const sel = $("channels");
+  const current = sel.value || new URLSearchParams(location.search).get("channel");
   sel.innerHTML = "";
   for (const ch of info.channels)
     sel.add(new Option(`${ch.id} · ${ch.width}×${ch.height} @ ${ch.fps} · ${ch.bitrate_kbps} kbps`, ch.id));
-  const wanted = new URLSearchParams(location.search).get("channel");
-  if (wanted) sel.value = wanted;
-  connect();
+  const still = info.channels.some((c) => c.id === current);
+  if (still) sel.value = current;
+  $("remove").disabled = sel.value === "mosaic";
+  if (!still || !ws || ws.readyState > 1) { codec = null; connect(); }
 }
+
+// channel list changes pushed by the producer (via the relay)
+const events = new EventSource("/api/events");
+events.onmessage = (e) => {
+  const ev = JSON.parse(e.data);
+  if (ev.event === "channel_added") log(`+ ${ev.channel.id} added (${ev.channel.width}×${ev.channel.height} @ ${ev.channel.fps})`);
+  if (ev.event === "channel_removed") log(`− ${ev.id} removed`);
+  if (ev.event) loadChannels().catch(() => {});
+};
+
+// add / remove camera form
+const anchors = ["world", "ego", ...[...Array(12).keys()].map((i) => `car:${i}`), ...[...Array(6).keys()].map((i) => `drone:${i}`)];
+for (const a of anchors) $("cam-attach").add(new Option(a));
+for (const a of ["(default)", "forward", ...anchors.filter((a) => a !== "world")]) $("cam-look").add(new Option(a));
+$("cam-add").onclick = async () => {
+  const [width, height] = $("cam-size").value.split("x").map(Number);
+  const body = { name: $("cam-name").value.trim(), attach: $("cam-attach").value, width, height, fps: Number($("cam-fps").value) };
+  if ($("cam-look").value !== "(default)") body.look_at = $("cam-look").value;
+  if ($("cam-life").value) body.lifetime = Number($("cam-life").value);
+  const r = await (await fetch("/api/cameras", { method: "POST", body: JSON.stringify(body) })).json();
+  log(r.ok ? `added ${r.channel.id} on port ${r.channel.port}` : `add failed: ${r.error}`);
+  if (r.ok) { $("cam-name").value = ""; $("channels").value = r.channel.id; }
+};
+$("remove").onclick = async () => {
+  const id = $("channels").value;
+  if (!id || id === "mosaic" || !confirm(`Remove camera ${id} from the producer?`)) return;
+  const r = await (await fetch(`/api/cameras/${encodeURIComponent(id)}`, { method: "DELETE" })).json();
+  log(r.ok ? `removed ${id}` : `remove failed: ${r.error}`);
+};
 
 function makeDecoder() {
   decoder?.state !== "closed" && decoder?.close();
@@ -95,6 +156,7 @@ function connect() {
   ws.onmessage = async (ev) => {
     if (typeof ev.data === "string") {
       const msg = JSON.parse(ev.data);
+      if (msg.type === "gone") { status(`channel ${msg.id} was removed`, true); $("channels").value = ""; return; }
       if (msg.type === "config" && msg.codec !== codec) await configure(msg.codec);
       return;
     }
@@ -123,6 +185,7 @@ setInterval(() => {
 }, 1000);
 
 $("channels").onchange = () => {
+  $("remove").disabled = $("channels").value === "mosaic";
   const url = new URL(location); url.searchParams.set("channel", $("channels").value); history.replaceState(null, "", url);
   codec = null; connect();
 };

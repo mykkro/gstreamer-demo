@@ -418,6 +418,7 @@ dependencies = [
  "gst-demo",
  "gstreamer",
  "gstreamer-app",
+ "serde_json",
 ]
 
 [[package]]

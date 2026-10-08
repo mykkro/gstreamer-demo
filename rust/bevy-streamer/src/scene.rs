@@ -22,6 +22,14 @@ pub struct Lane {
 #[derive(Component)]
 pub struct Ego;
 
+/// Entities a dynamic camera can be attached to (by index: car:N, drone:N).
+#[derive(Resource, Clone)]
+pub struct Anchors {
+    pub ego: Entity,
+    pub cars: Vec<Entity>,
+    pub drones: Vec<Entity>,
+}
+
 #[derive(Component)]
 pub struct Drone {
     phase: f32,
@@ -48,7 +56,7 @@ pub fn spawn_world(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     shadows: bool,
-) -> Entity {
+) -> Anchors {
     let mut mat = |r: f32, g: f32, b: f32| {
         materials.add(StandardMaterial { base_color: Color::srgb(r, g, b), perceptual_roughness: 0.9, ..default() })
     };
@@ -146,23 +154,27 @@ pub fn spawn_world(
             })
             .id()
     };
+    let mut cars = Vec::new();
     for i in 0..8 {
         let lane = Lane { radius: ONCOMING_LANE, angular_speed: -11.0 / ONCOMING_LANE, phase: i as f32 * TAU / 8.0 };
-        spawn_car(commands, palette[i % palette.len()].clone(), lane);
+        cars.push(spawn_car(commands, palette[i % palette.len()].clone(), lane));
     }
     for i in 1..5 {
         let lane = Lane { radius: EGO_LANE, angular_speed: EGO_SPEED / EGO_LANE, phase: i as f32 * TAU / 5.0 };
-        spawn_car(commands, palette[(i + 2) % palette.len()].clone(), lane);
+        cars.push(spawn_car(commands, palette[(i + 2) % palette.len()].clone(), lane));
     }
     let ego = spawn_car(commands, mat(0.85, 0.15, 0.12), Lane { radius: EGO_LANE, angular_speed: EGO_SPEED / EGO_LANE, phase: 0.0 });
     commands.entity(ego).insert(Ego);
 
     // drones circling over the park
     let drone = meshes.add(Cuboid::new(3.0, 3.0, 3.0));
-    for i in 0..6 {
-        commands.spawn((Mesh3d(drone.clone()), MeshMaterial3d(palette[i].clone()), Transform::default(), Drone { phase: i as f32 }));
-    }
-    ego
+    let drones = (0..6)
+        .map(|i| {
+            let d = (Mesh3d(drone.clone()), MeshMaterial3d(palette[i].clone()), Transform::default(), Drone { phase: i as f32 });
+            commands.spawn(d).id()
+        })
+        .collect();
+    Anchors { ego, cars, drones }
 }
 
 pub fn drive(time: Res<Time>, mut cars: Query<(&Lane, &mut Transform)>) {

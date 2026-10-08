@@ -32,11 +32,11 @@ const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), "public")
 const MAX_BUFFERED = 4 * 1024 * 1024; // per-client send backlog before we drop frames until the next keyframe
 
 // ---- producer control protocol (same as python/common.py) ------------------------------------
-function producerRequest(cmd) {
+function producerSend(msg, timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
-    const sock = net.connect(CONTROL_PORT, opt.producer, () => sock.write(JSON.stringify({ cmd }) + "\n"));
+    const sock = net.connect(CONTROL_PORT, opt.producer, () => sock.write(JSON.stringify(msg) + "\n"));
     let buf = "";
-    sock.setTimeout(3000, () => sock.destroy(new Error("timeout")));
+    sock.setTimeout(timeoutMs, () => sock.destroy(new Error("timeout")));
     sock.on("data", (d) => {
       buf += d;
       const nl = buf.indexOf("\n");
@@ -44,6 +44,32 @@ function producerRequest(cmd) {
     });
     sock.on("error", reject);
   });
+}
+const producerRequest = (cmd) => producerSend({ cmd });
+
+// Channel changes pushed by the producer ("watch"), forwarded to browsers as Server-Sent Events.
+const eventClients = new Set();
+function broadcastEvent(ev) {
+  for (const res of eventClients) res.write(`data: ${JSON.stringify(ev)}\n\n`);
+}
+function watchProducer() {
+  const sock = net.connect(CONTROL_PORT, opt.producer, () => sock.write(JSON.stringify({ cmd: "watch" }) + "\n"));
+  let buf = "", first = true;
+  sock.on("data", (d) => {
+    buf += d;
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (first) { first = false; broadcastEvent({ event: "connected" }); continue; } // initial list
+      const ev = JSON.parse(line);
+      if (ev.event === "channel_removed") dropRelay(ev.id);
+      console.log(`producer: ${ev.event} ${ev.id ?? ev.channel?.id}`);
+      broadcastEvent(ev);
+    }
+  });
+  sock.on("error", () => {});
+  sock.on("close", () => setTimeout(watchProducer, 2000)); // producer restarted / not up yet
 }
 
 // ---- one upstream connection per channel, fanned out to all browser clients ----------------
@@ -125,11 +151,59 @@ class ChannelRelay {
 
 const relays = new Map(); // channel id -> ChannelRelay
 
+/** A channel was removed by the producer: tell its viewers and forget the relay. */
+function dropRelay(id) {
+  const relay = relays.get(id);
+  if (!relay) return;
+  relays.delete(id);
+  for (const ws of relay.clients) {
+    ws.send(JSON.stringify({ type: "gone", id }));
+    ws.close();
+  }
+  relay.clients.clear();
+  relay.disconnect();
+}
+
 // ---- HTTP: static files + /api/channels -------------------------------------------------------
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css" };
 
+async function readBody(req) {
+  let body = "";
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > 10000) throw new Error("body too large");
+  }
+  return body ? JSON.parse(body) : {};
+}
+
+function sendJson(res, status, obj) {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(obj));
+}
+
 async function onRequest(req, res) {
   const url = new URL(req.url, "http://x");
+  if (url.pathname === "/api/events") {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    res.write(": channel events\n\n");
+    eventClients.add(res);
+    req.on("close", () => eventClients.delete(res));
+    return;
+  }
+  // add / remove cameras on producers that support it (bevy-streamer)
+  const cam = url.pathname.match(/^\/api\/cameras(?:\/([a-z0-9_]+))?$/);
+  if (cam) {
+    try {
+      let msg;
+      if (req.method === "POST" && !cam[1]) msg = { ...(await readBody(req)), cmd: "add_camera" };
+      else if (req.method === "DELETE" && cam[1]) msg = { cmd: "remove_camera", name: cam[1] };
+      else return sendJson(res, 405, { ok: false, error: "use POST /api/cameras or DELETE /api/cameras/<name>" });
+      const reply = await producerSend(msg, 8000);
+      return sendJson(res, reply.ok ? 200 : 400, reply);
+    } catch (e) {
+      return sendJson(res, 502, { ok: false, error: e.message });
+    }
+  }
   if (url.pathname === "/api/channels") {
     try {
       const info = await producerRequest("list");
@@ -185,6 +259,7 @@ server.on("upgrade", async (req, socket, head) => {
   });
 });
 
+watchProducer();
 server.listen(Number(opt.port), () => {
   const scheme = opt.https ? "https" : "http";
   console.log(`H.265 WebCodecs relay for producer ${opt.producer}:${CONTROL_PORT}`);

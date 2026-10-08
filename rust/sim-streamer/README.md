@@ -92,7 +92,9 @@ Design choices in the demo, and why:
 - **Session limits:** consumer GeForce cards allow a limited number of simultaneous NVENC sessions (8 at the
   time of writing). Professional and datacenter GPUs (RTX A-series, L4, …) are effectively unlimited.
   Each channel is one session. Ways to handle it:
-  - encode **on demand**: the demo opens a channel's valve only while someone watches
+  - encode **on demand**: the demo opens a channel's valve only while someone watches, and stops the
+    encoder element while nobody does. A running NVENC encoder holds its session even without input; with
+    this, idle channels hold 0 sessions
   - stream a **mosaic** and let receivers crop
   - spread channels over several GPUs
 - **Throughput** is roughly pixels per second. 6 × 360p30 is about 41 Mpx/s, well within one NVENC

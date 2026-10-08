@@ -6,7 +6,10 @@
 Keys in the OpenCV window: 1..9 switch channel, q / Esc quit.
 """
 import argparse
+import json
+import socket
 import sys
+import threading
 import time
 
 import numpy as np
@@ -27,6 +30,29 @@ def print_channels(info):
     for i, ch in enumerate(info["channels"], 1):
         print(f"  [{i}] {ch['id']:>8}  {ch['width']}x{ch['height']} @ {ch['fps']} fps  "
               f"{ch['codec']}/{ch['container']}  {ch['bitrate_kbps']} kbps  ({ch['encoder']}, port {ch['port']})")
+
+
+def watch_channels(host, port, channels):
+    """Keep `channels` up to date from the producer's pushed events (bevy-streamer adds/removes
+    cameras at runtime). Producers without dynamic channels don't push anything."""
+    try:
+        with socket.create_connection((host, port)) as s:
+            s.sendall(b'{"cmd": "watch"}\n')
+            f = s.makefile("r", encoding="utf-8")
+            if not json.loads(f.readline() or "{}").get("watching"):
+                return
+            for line in f:
+                ev = json.loads(line)
+                if ev.get("event") == "channel_added":
+                    ch = ev["channel"]
+                    channels.append(ch)
+                    key = f" - key {len(channels)}" if len(channels) <= 9 else ""
+                    print(f"[producer] + channel {ch['id']} ({ch['width']}x{ch['height']} @ {ch['fps']} fps){key}")
+                elif ev.get("event") == "channel_removed":
+                    channels[:] = [c for c in channels if c["id"] != ev["id"]]
+                    print(f"[producer] - channel {ev['id']}")
+    except (OSError, ValueError):
+        pass
 
 
 def choose_channel(channels, wanted):
@@ -110,6 +136,8 @@ def run(args):
         return
     channels = info["channels"]
     idx = choose_channel(channels, args.channel)
+    # channels can appear/disappear at runtime: keep the list (and keys 1-9) current
+    threading.Thread(target=watch_channels, args=(args.host, args.control_port, channels), daemon=True).start()
 
     if args.display == "opencv" and not args.no_window:
         import cv2
@@ -118,6 +146,7 @@ def run(args):
     total_frames = 0
 
     while True:  # (re)connect loop
+        idx = max(0, min(idx, len(channels) - 1))
         ch = channels[idx]
         print(f"Subscribing to {ch['id']} on {args.host}:{ch['port']}")
         rx.build(ch)
@@ -168,10 +197,15 @@ def run(args):
             continue
         print(f"Stream lost ({error}); reconnecting in 2 s...")
         time.sleep(2)
-        try:  # the producer may have restarted with different channels
-            channels = request(args.host, args.control_port, "list")["channels"]
-            idx = min(idx, len(channels) - 1)
-        except OSError:
+        try:  # the producer may have restarted, or this channel was removed
+            channels[:] = request(args.host, args.control_port, "list")["channels"]
+            ids = [c["id"] for c in channels]
+            if ch["id"] in ids:
+                idx = ids.index(ch["id"])
+            else:
+                print(f"Channel {ch['id']} no longer exists, switching to {ids[0]}")
+                idx = 0
+        except (OSError, IndexError):
             pass
 
 

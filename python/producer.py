@@ -196,6 +196,8 @@ class Producer:
         cmd = msg.get("cmd")
         if cmd in ("list", "info"):
             return self.info()
+        if cmd == "watch":  # channels never change here, so no events will follow
+            return dict(self.info(), watching=True)
         if cmd == "stats":
             return {"ok": True, "clients": self.clients()}
         return {"ok": False, "error": f"unknown command {cmd!r}"}

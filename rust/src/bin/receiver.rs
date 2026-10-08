@@ -9,7 +9,7 @@
 //! video sink (D3D12/D3D11 on Windows). Keys in the window: 1..9 switch channel, q / Esc quit.
 
 use std::io::IsTerminal;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -205,8 +205,31 @@ fn main() -> Result<()> {
     if args.list {
         return Ok(());
     }
-    let mut channels = list.channels;
-    let mut idx = choose_channel(&channels, args.channel.as_deref())?;
+    // channels can appear/disappear at runtime (e.g. bevy-streamer): a watcher thread keeps this list current
+    let channels = Arc::new(Mutex::new(list.channels));
+    let mut want = {
+        let chs = channels.lock().unwrap();
+        chs[choose_channel(&chs, args.channel.as_deref())?].id.clone()
+    };
+    let (host, port, shared) = (args.host.clone(), args.control_port, channels.clone());
+    std::thread::spawn(move || {
+        let _ = gst_demo::watch(&host, port, |ev| match ev["event"].as_str() {
+            Some("channel_added") => {
+                if let Ok(ch) = serde_json::from_value::<Channel>(ev["channel"].clone()) {
+                    let mut chs = shared.lock().unwrap();
+                    chs.push(ch.clone());
+                    let key = if chs.len() <= 9 { format!(" - key {}", chs.len()) } else { String::new() };
+                    println!("[producer] + channel {} ({}x{} @ {} fps){key}", ch.id, ch.width, ch.height, ch.fps);
+                }
+            }
+            Some("channel_removed") => {
+                let id = ev["id"].as_str().unwrap_or_default();
+                shared.lock().unwrap().retain(|c| c.id != id);
+                println!("[producer] - channel {id}");
+            }
+            _ => {}
+        });
+    });
 
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
@@ -214,16 +237,25 @@ fn main() -> Result<()> {
     let deadline = (args.duration > 0.0).then(|| Instant::now() + Duration::from_secs_f64(args.duration));
 
     loop {
-        match play(&args, &channels, idx, &stop, deadline)? {
+        let snapshot = channels.lock().unwrap().clone();
+        anyhow::ensure!(!snapshot.is_empty(), "producer has no channels");
+        let idx = match snapshot.iter().position(|c| c.id == want) {
+            Some(i) => i,
+            None => {
+                println!("Channel {want} no longer exists, switching to {}", snapshot[0].id);
+                want = snapshot[0].id.clone();
+                0
+            }
+        };
+        match play(&args, &snapshot, idx, &stop, deadline)? {
             Outcome::Quit => return Ok(()),
-            Outcome::Switch(i) => idx = i,
+            Outcome::Switch(i) => want = snapshot[i].id.clone(),
             Outcome::Lost(err) => {
                 println!("Stream lost ({err}); reconnecting in 2 s...");
                 std::thread::sleep(Duration::from_secs(2));
-                // the producer may have restarted with different channels
+                // the producer may have restarted, or this channel was removed
                 if let Ok(l) = list_channels(&args.host, args.control_port) {
-                    channels = l.channels;
-                    idx = idx.min(channels.len() - 1);
+                    *channels.lock().unwrap() = l.channels;
                 }
             }
         }
