@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GStreamer WebRTC</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f4f4f5; --fg: #18181b; --card: #fff; --muted: #71717a; --accent: #2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111113; --fg: #e4e4e7; --card: #1c1c1f; --muted: #a1a1aa; --accent: #60a5fa; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  select, button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid #8884; background: var(--card); color: var(--fg); }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  video { width: 100%; background: #000; border-radius: 8px; aspect-ratio: 16 / 9; }
+  #stats { color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 8px; min-height: 1.4em; }
+  #status { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>GStreamer demo · WebRTC</h1>
+  <div class="bar">
+    <select id="producers"><option>waiting for producers…</option></select>
+    <button id="play" class="primary">Play</button>
+    <button id="stop">Stop</button>
+    <span id="status">connecting to signalling…</span>
+  </div>
+  <video id="video" autoplay playsinline muted controls></video>
+  <div id="stats"></div>
+</main>
+<script>
+// Minimal client for the gst-plugins-rs (webrtcsink) signalling protocol:
+//   <- welcome{peerId}            -> setPeerStatus{roles:[listener]}, list
+//   <- list{producers}, peerStatusChanged{peerId, roles, meta}
+//   -> startSession{peerId}       <- sessionStarted{sessionId}
+//   <- peer{sessionId, sdp:offer} -> peer{sessionId, sdp:answer}
+//   <-> peer{sessionId, ice:{candidate, sdpMLineIndex}}      -> endSession{sessionId}
+const SIGNALLING = `ws://${location.hostname || "localhost"}:8443`;
+const $ = (id) => document.getElementById(id);
+const producers = new Map();      // peerId -> meta
+let ws, pc, sessionId, statsTimer;
+
+function setStatus(t) { $("status").textContent = t; }
+function send(msg) { ws.send(JSON.stringify(msg)); }
+
+function renderProducers() {
+  const sel = $("producers"), prev = sel.value;
+  sel.innerHTML = "";
+  for (const [id, meta] of producers) sel.add(new Option(meta?.name || id, id));
+  if (!producers.size) sel.add(new Option("no producer online"));
+  if (producers.has(prev)) sel.value = prev;
+}
+
+function connectSignalling() {
+  ws = new WebSocket(SIGNALLING);
+  ws.onopen = () => setStatus("signalling connected");
+  ws.onclose = () => { setStatus("signalling lost, retrying…"); producers.clear(); renderProducers(); setTimeout(connectSignalling, 2000); };
+  ws.onmessage = async (ev) => {
+    const msg = JSON.parse(ev.data);
+    switch (msg.type) {
+      case "welcome":
+        send({ type: "setPeerStatus", roles: ["listener"], meta: null });
+        send({ type: "list" });
+        break;
+      case "list":
+        producers.clear();
+        for (const p of msg.producers) producers.set(p.id, p.meta);
+        renderProducers();
+        if (producers.size && !pc) play();          // autoplay the first producer
+        break;
+      case "peerStatusChanged":
+        if (msg.roles.includes("producer")) producers.set(msg.peerId, msg.meta); else producers.delete(msg.peerId);
+        renderProducers();
+        break;
+      case "sessionStarted":
+        sessionId = msg.sessionId;
+        break;
+      case "peer":
+        if (msg.sdp?.type === "offer") {
+          await pc.setRemoteDescription(msg.sdp);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          send({ type: "peer", sessionId, sdp: { type: "answer", sdp: answer.sdp } });
+        } else if (msg.ice) {
+          await pc.addIceCandidate({ candidate: msg.ice.candidate, sdpMLineIndex: msg.ice.sdpMLineIndex });
+        }
+        break;
+      case "endSession":
+        stop(false);
+        setStatus("producer ended the session");
+        break;
+      case "error":
+        setStatus("signalling error: " + msg.details);
+        break;
+    }
+  };
+}
+
+function play() {
+  const peerId = $("producers").value;
+  if (!producers.has(peerId)) return;
+  stop();
+  pc = new RTCPeerConnection({ iceServers: [] });   // LAN demo: host candidates are enough
+  pc.ontrack = (ev) => { $("video").srcObject = ev.streams[0] || new MediaStream([ev.track]); };
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate && sessionId)
+      send({ type: "peer", sessionId, ice: { candidate: ev.candidate.candidate, sdpMLineIndex: ev.candidate.sdpMLineIndex } });
+  };
+  pc.onconnectionstatechange = () => setStatus("WebRTC: " + pc.connectionState);
+  send({ type: "startSession", peerId });
+  statsTimer = setInterval(showStats, 1000);
+}
+
+function stop(notify = true) {
+  if (sessionId && notify && ws?.readyState === 1) send({ type: "endSession", sessionId });
+  sessionId = null;
+  last = null;
+  clearInterval(statsTimer);
+  pc?.close(); pc = null;
+  $("video").srcObject = null;
+  $("stats").textContent = "";
+}
+
+let last = null;
+async function showStats() {
+  if (!pc) return;
+  const report = await pc.getStats();
+  let inbound, codec;
+  report.forEach((s) => { if (s.type === "inbound-rtp" && s.kind === "video") inbound = s; });
+  if (!inbound) return;
+  codec = report.get(inbound.codecId);
+  const dt = last ? (inbound.timestamp - last.timestamp) / 1000 : 0;
+  const kbps = dt ? ((inbound.bytesReceived - last.bytesReceived) * 8) / 1000 / dt : 0;
+  const fps = dt ? (inbound.framesDecoded - last.framesDecoded) / dt : 0;
+  last = inbound;
+  $("stats").textContent =
+    `codec ${codec?.mimeType ?? "?"} · ${inbound.frameWidth ?? "?"}×${inbound.frameHeight ?? "?"} @ ` +
+    `${fps.toFixed(1)} fps · ${kbps.toFixed(0)} kbps · decoder ${inbound.decoderImplementation ?? "?"} · ` +
+    `jitter buffer ${inbound.jitterBufferEmittedCount ? ((inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000).toFixed(0) : "?"} ms`;
+}
+
+$("play").onclick = play;
+$("stop").onclick = () => { stop(); setStatus("stopped"); };
+connectSignalling();
+</script>
+</body>
+</html>

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H.265 WebCodecs Viewer</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f4f4f5; --fg: #18181b; --card: #fff; --muted: #71717a; --bad: #dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111113; --fg: #e4e4e7; --card: #1c1c1f; --muted: #a1a1aa; --bad: #f87171; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  select { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid #8884; background: var(--card); color: var(--fg); }
+  canvas { width: 100%; background: #000; border-radius: 8px; aspect-ratio: 16 / 9; display: block; }
+  #stats { color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 8px; min-height: 1.4em; }
+  #status { color: var(--muted); }
+  #status.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>GStreamer demo · H.265 via WebCodecs</h1>
+  <div class="bar">
+    <select id="channels"></select>
+    <span id="status">loading…</span>
+  </div>
+  <canvas id="canvas" width="1280" height="720"></canvas>
+  <div id="stats"></div>
+</main>
+<script>
+// Receives the producer's original H.265 access units (Annex B) over a WebSocket and decodes
+// them with the browser's VideoDecoder (GPU when available). Binary message layout:
+//   [flags u8: bit0 = keyframe][timestamp µs float64 BE][H.265 Annex-B access unit]
+// Text messages: {"type":"config","codec":"hev1.1.6.L120.90", "channel":{...}}
+const $ = (id) => document.getElementById(id);
+const canvas = $("canvas"), ctx = canvas.getContext("2d");
+let ws, decoder, codec, waitKey = true;
+let stat = { frames: 0, bytes: 0, dropped: 0, t0: performance.now(), fps: 0, kbps: 0 };
+
+function status(text, bad = false) { $("status").textContent = text; $("status").className = bad ? "bad" : ""; }
+
+async function loadChannels() {
+  const res = await fetch("/api/channels");
+  const info = await res.json();
+  if (!info.ok) { status(info.error, true); setTimeout(loadChannels, 2000); return; }
+  const sel = $("channels");
+  sel.innerHTML = "";
+  for (const ch of info.channels)
+    sel.add(new Option(`${ch.id} · ${ch.width}×${ch.height} @ ${ch.fps} · ${ch.bitrate_kbps} kbps`, ch.id));
+  const wanted = new URLSearchParams(location.search).get("channel");
+  if (wanted) sel.value = wanted;
+  connect();
+}
+
+function makeDecoder() {
+  decoder?.state !== "closed" && decoder?.close();
+  decoder = new VideoDecoder({
+    output: (frame) => {
+      if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+        canvas.width = frame.displayWidth; canvas.height = frame.displayHeight;
+      }
+      ctx.drawImage(frame, 0, 0);
+      frame.close();
+      stat.frames++;
+    },
+    error: (e) => { status("decoder error: " + e.message, true); waitKey = true; setTimeout(() => configure(codec), 0); },
+  });
+}
+
+async function configure(c) {
+  codec = c;
+  const config = { codec, hardwareAcceleration: "prefer-hardware", optimizeForLatency: true };
+  let { supported } = await VideoDecoder.isConfigSupported(config);
+  if (!supported) {   // some browsers only decode HEVC in software or vice versa
+    config.hardwareAcceleration = "no-preference";
+    ({ supported } = await VideoDecoder.isConfigSupported(config));
+  }
+  if (!supported) { status(`This browser cannot decode ${codec} (H.265). Try Chrome/Edge with a GPU that supports HEVC, or Safari.`, true); return false; }
+  makeDecoder();
+  decoder.configure(config); // no "description" -> bitstream is Annex B with in-band VPS/SPS/PPS
+  waitKey = true;
+  status(`decoding ${codec}`);
+  return true;
+}
+
+function connect() {
+  ws?.close();
+  const ch = $("channels").value;
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${scheme}://${location.host}/ws?channel=${encodeURIComponent(ch)}`);
+  ws.binaryType = "arraybuffer";
+  status(`connecting to ${ch}…`);
+  ws.onclose = (ev) => { if (ev.target === ws) { status("connection lost, retrying…", true); setTimeout(connect, 2000); } };
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === "string") {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "config" && msg.codec !== codec) await configure(msg.codec);
+      return;
+    }
+    stat.bytes += ev.data.byteLength;
+    if (!decoder || decoder.state !== "configured") return;
+    const view = new DataView(ev.data);
+    const key = (view.getUint8(0) & 1) === 1;
+    if (waitKey && !key) return;
+    // falling behind (slow decoder or tab in background): skip to the next keyframe
+    if (decoder.decodeQueueSize > 8 && !key) { waitKey = true; stat.dropped++; return; }
+    waitKey = false;
+    decoder.decode(new EncodedVideoChunk({
+      type: key ? "key" : "delta",
+      timestamp: view.getFloat64(1),
+      data: new Uint8Array(ev.data, 9),
+    }));
+  };
+}
+
+setInterval(() => {
+  const now = performance.now(), dt = (now - stat.t0) / 1000;
+  stat.fps = stat.frames / dt; stat.kbps = (stat.bytes * 8) / 1000 / dt;
+  $("stats").textContent = `${codec ?? "?"} · ${canvas.width}×${canvas.height} · ${stat.fps.toFixed(1)} fps · ` +
+    `${stat.kbps.toFixed(0)} kbps · decode queue ${decoder?.decodeQueueSize ?? 0} · skipped ${stat.dropped}`;
+  stat = { ...stat, frames: 0, bytes: 0, t0: now };
+}, 1000);
+
+$("channels").onchange = () => {
+  const url = new URL(location); url.searchParams.set("channel", $("channels").value); history.replaceState(null, "", url);
+  codec = null; connect();
+};
+
+if (!("VideoDecoder" in window)) {
+  status(window.isSecureContext ? "This browser has no WebCodecs support." :
+    "WebCodecs needs a secure context: open via http://localhost or start the server with --https.", true);
+} else {
+  loadChannels().catch((e) => status(e.message, true));
+}
+</script>
+</body>
+</html>

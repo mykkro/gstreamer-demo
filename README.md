@@ -13,6 +13,8 @@ gstreamer-demo/
 ├── README.md
 ├── python/            producer.py, receiver.py, common.py, requirements.txt
 ├── rust/              Cargo.toml, env.ps1, src/lib.rs, src/bin/{producer,receiver}.rs
+├── web/webrtc/        browser viewing via WebRTC (Python gateway + page)
+├── web/h265-webcodecs/ browser viewing of the original H.265 via Node.js + WebCodecs
 └── .venv/             Python virtual env (created in step 1)
 ```
 
@@ -179,7 +181,64 @@ OpenCV + LLVM/libclang install.
 > in `rust\target`. If `cargo build` fails with "access denied" or files that vanish, add `rust\target` to the
 > AV exceptions.
 
-## 4. Control protocol
+
+## 4. Viewing in a browser
+
+Browsers can't read the producer's raw TCP/MPEG-TS stream, so [web/](web/) has two gateways that run next to
+the producer. Both are separate subscribers, like any other receiver, and neither needs changes to the producer.
+
+|  | [web/webrtc](web/webrtc/) | [web/h265-webcodecs](web/h265-webcodecs/) |
+|---|---|---|
+| How | Python gateway decodes a channel → `webrtcsink` re-encodes for each viewer | Node relays the producer's **original H.265** → browser decodes with WebCodecs |
+| Codec in browser | H.264 / VP8 (H.265 opt-in, see below) | H.265, untouched |
+| Latency | ~100–300 ms, adaptive bitrate per viewer | ~100–300 ms, no transcoding |
+| Many viewers | one encode **per viewer** (CPU/GPU cost grows) | one upstream connection per channel, fanned out (only bandwidth grows) |
+| Browsers | all modern browsers | needs HEVC decoding in WebCodecs: Chrome/Edge with a GPU HEVC decoder, Safari |
+| Needs | nothing extra (`webrtcsink` is in `gstreamer-bundle`) | Node.js 18+ |
+
+### WebRTC
+
+```powershell
+python python\producer.py                 # terminal 1
+python web\webrtc\webrtc_gateway.py       # terminal 2 – re-publishes the highest channel
+# open http://localhost:8081/
+```
+
+- `webrtcsink` runs the signalling server on `ws://<host>:8443` and serves [web/webrtc/www/index.html](web/webrtc/www/index.html)
+  on port 8081. The page is a minimal client for the gst-plugins-rs signalling protocol, written without
+  extra libraries.
+- Options: `--channel 720p30`, `--codecs h264,vp8`, `--http-port`, `--signalling-port`,
+  `--stun stun://…` (only needed across NAT; TURN would be needed for strict NATs).
+- Congestion control starts low and ramps up, so the first seconds look soft.
+- **H.265 over WebRTC:** `--codecs h265,h264,vp8` makes `webrtcsink` offer H.265, and Chrome negotiates it.
+  In testing (Chrome, October 2026), Chrome decoded almost no frames from that stream, so the default is
+  H.264/VP8. For H.265 in the browser, use the WebCodecs demo.
+
+### H.265 via Node.js + WebCodecs
+
+```powershell
+python python\producer.py                 # terminal 1
+cd web\h265-webcodecs
+npm install                               # once
+node server.js                            # terminal 2
+# open http://localhost:8080/   (pick a channel; ?channel=720p30 also works)
+```
+
+- [server.js](web/h265-webcodecs/server.js) opens **one** TCP connection per channel to the producer, but only
+  while someone is watching. [ts.js](web/h265-webcodecs/ts.js) extracts the H.265 frames from the MPEG-TS
+  stream, and Node forwards them over WebSockets to every viewer of that channel.
+- **Instant join:** the relay keeps the frames since the last keyframe and sends them to each new viewer first,
+  so the picture appears immediately instead of after up to one keyframe interval (2 s).
+- **Slow viewers:** if a viewer's WebSocket backlog grows above 4 MB, that viewer skips frames until the next
+  keyframe. Other viewers aren't affected.
+- The browser page reads the codec string (e.g. `hev1.1.6.L120.90`) from the stream, checks
+  `VideoDecoder.isConfigSupported()`, decodes on the GPU, and draws to a `<canvas>`.
+- **Other machines:** WebCodecs only works in a *secure context*. `http://localhost` counts as one, but
+  `http://192.168.x.x` doesn't. For LAN viewers start `node server.js --https`, which uses a self-signed
+  certificate the browser asks you to accept once. Use `--producer <ip>` if the producer runs elsewhere and
+  `--port` to change 8080.
+
+## 5. Control protocol
 
 Newline-delimited JSON over TCP (port 5000). Both implementations speak it ([python/common.py](python/common.py), [rust/src/lib.rs](rust/src/lib.rs)):
 
@@ -192,7 +251,7 @@ Newline-delimited JSON over TCP (port 5000). Both implementations speak it ([pyt
 ← {"ok": true, "clients": {"1080p30": 0, "720p30": 2, "480p15": 1}}
 ```
 
-## 5. How it scales to many subscribers
+## 6. How it scales to many subscribers
 
 - **Decode once, encode once per channel.** The source is decoded once and split with `tee`. Each channel
   is encoded once. `tcpserversink` then sends the same encoded bytes to every connected client. Ten viewers
@@ -209,7 +268,7 @@ Newline-delimited JSON over TCP (port 5000). Both implementations speak it ([pyt
   `SEGMENT_DONE` and the producer seeks back to 0 without flushing. Timestamps keep increasing, so
   receivers never see the stream end.
 
-## 6. H.265 notes and optimization
+## 7. H.265 notes and optimization
 
 **Encoders available on Windows** (`gst-inspect-1.0 | findstr h265enc`):
 
@@ -245,11 +304,10 @@ Static content (screens, cameras) needs much less than motion-heavy content.
 - *Many receivers on a LAN:* replace TCP with **RTP over UDP multicast**
   (`rtph265pay config-interval=-1 ! udpsink host=239.1.1.1 auto-multicast=true`). The producer then sends
   each packet once, however many receivers there are, but you lose TCP's reliability.
-- *Internet / NAT / players like VLC:* use **RTSP** (`gst-rtsp-server`, also in the wheels), **SRT**
-  (`srtsink`, good on lossy links), or **WebRTC** (`webrtcsink`) for browsers.
-  Browser support for H.265 varies, so check your target browsers before relying on it.
+- *Internet / NAT / players like VLC:* use **RTSP** (`gst-rtsp-server`, also in the wheels) or **SRT**
+  (`srtsink`, good on lossy links). For browsers see section 4.
 
-## 7. Files
+## 8. Files
 
 | file | purpose |
 |---|---|
@@ -260,6 +318,11 @@ Static content (screens, cameras) needs much less than motion-heavy content.
 | [rust/src/bin/producer.rs](rust/src/bin/producer.rs) | Rust port of the producer (same pipeline and protocol) |
 | [rust/src/bin/receiver.rs](rust/src/bin/receiver.rs) | Rust receiver, native GStreamer video window |
 | [rust/src/lib.rs](rust/src/lib.rs) | shared `Channel` type + control request helper |
+| [web/webrtc/webrtc_gateway.py](web/webrtc/webrtc_gateway.py) | WebRTC gateway (`webrtcsink` + built-in signalling and web server) |
+| [web/webrtc/www/index.html](web/webrtc/www/index.html) | WebRTC viewer page |
+| [web/h265-webcodecs/server.js](web/h265-webcodecs/server.js) | Node relay: producer H.265 → WebSocket fan-out with GOP cache |
+| [web/h265-webcodecs/ts.js](web/h265-webcodecs/ts.js) | minimal MPEG-TS demuxer + H.265 keyframe/codec-string parsing |
+| [web/h265-webcodecs/public/index.html](web/h265-webcodecs/public/index.html) | WebCodecs viewer page |
 | [rust/env.cmd](rust/env.cmd), [rust/env.ps1](rust/env.ps1) | set up the shell for the GStreamer SDK before `cargo build` / running (cmd.exe / PowerShell) |
 
 ## Troubleshooting
@@ -273,6 +336,12 @@ Static content (screens, cameras) needs much less than motion-heavy content.
   fails, the SDK may have been installed as *Runtime* only. Re-run the installer with the *Development* type.
 - **Rust: `STATUS_DLL_NOT_FOUND` (0xc0000135) when running**: the SDK `bin` folder isn't on `PATH`. Run
   the env script in that window first (or set the variables permanently, see section 3).
+- **Browser page says "cannot decode hev1…"**: the browser/GPU has no HEVC decoder for WebCodecs. Try
+  Chrome or Edge on a machine with a recent GPU, or Safari, or use the WebRTC demo.
+- **WebCodecs page says it needs a secure context**: you opened it via an IP address over plain HTTP. Use
+  `node server.js --https`, or `http://localhost` on the same machine.
+- **WebRTC page connects but stays black on another machine**: allow UDP in the firewall, or add `--stun` /
+  a TURN server when crossing NATs.
 - **Debug logging:** `$env:GST_DEBUG="3"` (or `"tcpserversink:5"`) before starting a script.
 - **High CPU on the producer:** you're probably on `x265enc`. Try `--encoder nvenc`/`qsv`/`amf`, lower the
   channel list, or use `--channels 720p30:2000`.

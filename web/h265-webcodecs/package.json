@@ -1,0 +1,18 @@
+{
+  "name": "gstreamer-demo-h265-webcodecs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Relays the producer's H.265 channels to browsers over WebSocket for WebCodecs decoding",
+  "license": "MIT",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "selfsigned": "^2.4.1"
+  }
+}
