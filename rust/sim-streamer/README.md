@@ -199,7 +199,8 @@ The console prints render statistics every 5 s, for example:
 | [src/scene.rs](src/scene.rs) | the world: static boxes, traffic, ego vehicle, and the 6 `CameraDef`s (mount point, yaw/pitch, FOV) |
 | [src/render.rs](src/render.rs) | headless `wgpu`: one pipeline, instanced cube, a viewport per camera into the atlas, synchronous readback |
 | [src/shader.wgsl](src/shader.wgsl) | instanced vertex shader, Lambert lighting, checker ground, distance fog |
-| [src/main.rs](src/main.rs) | channels, the GStreamer pipeline (`appsrc` → `tee` → mosaic / `videocrop` per camera), render thread with real-time pacing |
+| [src/main.rs](src/main.rs) | render thread with real-time pacing, pushes each atlas into the shared streamer |
+| [../src/atlas.rs](../src/atlas.rs) | shared with bevy-streamer: the GStreamer pipeline (`appsrc` → `tee` → mosaic / `videocrop` per camera), channels, control server |
 | [../src/lib.rs](../src/lib.rs) | shared with the producer: encoder settings, `channel_branch` (valve → encoder → MPEG-TS → TCP), encode-on-demand wiring, control server |
 
 ### Where to take it next
@@ -211,3 +212,4 @@ The console prints render statistics every 5 s, for example:
 - Add lossless depth and segmentation outputs for ML consumers, as raw buffers and not video.
 - Pause rendering of cameras nobody subscribes to: the `stats` command already reports subscribers per
   channel.
+- For the same demo built on a game engine, see [bevy-streamer](../bevy-streamer/) (Bevy 0.18).

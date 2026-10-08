@@ -1,0 +1,15 @@
+[package]
+name = "bevy-streamer"
+version = "0.1.0"
+edition = "2024"
+description = "Bevy 0.18 scene rendered headlessly to textures, several cameras streamed as H.265 channels"
+license = "MIT"
+publish = false
+
+[dependencies]
+gst-demo = { path = ".." }
+anyhow = "1"
+bevy = "=0.18.1"
+clap = { version = "4", features = ["derive"] }
+gst = { package = "gstreamer", version = "0.25" }
+gst-app = { package = "gstreamer-app", version = "0.25" }

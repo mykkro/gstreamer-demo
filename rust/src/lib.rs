@@ -3,10 +3,13 @@
 //! * the JSON control protocol (identical to the Python version, so Rust and Python
 //!   producers/receivers can be mixed freely)
 //! * H.265 encoder selection/settings and the per-channel "encode on demand" wiring
+//! * [`atlas`]: the engine-agnostic "RGBA atlas of N cameras -> H.265 channels" streamer
 //!
 //! Protocol: newline-delimited JSON over TCP.
 //!   -> {"cmd": "list"}    <- {"ok": true, "source": ..., "channels": [...]}
 //!   -> {"cmd": "stats"}   <- {"ok": true, "clients": {"720p30": 2, ...}}
+
+pub mod atlas;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};

@@ -13,6 +13,5 @@ bytemuck = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 glam = { version = "0.34", features = ["bytemuck"] }
 gst = { package = "gstreamer", version = "0.25" }
-gst-app = { package = "gstreamer-app", version = "0.25" }
 pollster = "1"
 wgpu = "30"

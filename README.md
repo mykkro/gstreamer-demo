@@ -13,7 +13,8 @@ gstreamer-demo/
 ├── README.md
 ├── python/            producer.py, receiver.py, common.py, requirements.txt
 ├── rust/              Cargo workspace: src/lib.rs, src/bin/{producer,receiver}.rs, env.cmd/env.ps1
-│   └── sim-streamer/  headless 3D scene (wgpu) → 6 vehicle cameras streamed as H.265 channels
+│   ├── sim-streamer/  headless 3D scene (raw wgpu) → 6 vehicle cameras streamed as H.265 channels
+│   └── bevy-streamer/ the same with the Bevy 0.18 engine (render-to-texture + GPU readback)
 ├── web/webrtc/        browser viewing via WebRTC (Python gateway + page)
 ├── web/h265-webcodecs/ browser viewing of the original H.265 via Node.js + WebCodecs
 └── .venv/             Python virtual env (created in step 1)
@@ -168,12 +169,15 @@ The pip wheels don't include those, so install the official SDK:
    # or: cargo run --release --bin receiver -- --channel 720p30
    ```
 
-`cargo build --release` builds all three binaries of the workspace: `producer`, `receiver`, and `sim-streamer`.
+`cargo build --release` builds `producer`, `receiver`, and `sim-streamer`. The Bevy demo is built separately with
+`cargo build --release -p bevy-streamer`, because its first build takes several minutes.
 
 **3D rendering → streams:** [rust/sim-streamer](rust/sim-streamer/) renders a synthetic city headlessly with
 `wgpu` and streams 6 vehicle cameras plus a mosaic as H.265 channels. Every receiver here works with it. Its
 [README](rust/sim-streamer/README.md) also discusses the architecture and performance of streaming views from a
 game engine.
+[rust/bevy-streamer](rust/bevy-streamer/) does the same with **Bevy 0.18**. Its README explains how
+render-to-texture and GPU readback work in Bevy.
 
 The command-line options are the same as the Python scripts (`--channels`, `--encoder`, `--gop-seconds`,
 `--always-encode`, `--host`, `--decoder`, `--no-window`, `--duration`, …). See `--help`.
@@ -326,6 +330,8 @@ Static content (screens, cameras) needs much less than motion-heavy content.
 | [rust/src/bin/producer.rs](rust/src/bin/producer.rs) | Rust port of the producer (same pipeline and protocol) |
 | [rust/src/bin/receiver.rs](rust/src/bin/receiver.rs) | Rust receiver, native GStreamer video window |
 | [rust/src/lib.rs](rust/src/lib.rs) | shared: `Channel` type, control protocol (client and server), encoder settings, encode-on-demand channel wiring |
+| [rust/src/atlas.rs](rust/src/atlas.rs) | shared, engine-agnostic: RGBA camera atlas → mosaic and per-camera H.265 channels |
+| [rust/bevy-streamer/](rust/bevy-streamer/) | Bevy 0.18 app: cameras → `RenderTarget::Image` atlas with viewports → `Readback` → the same atlas streamer ([README](rust/bevy-streamer/README.md)) |
 | [rust/sim-streamer/](rust/sim-streamer/) | headless `wgpu` renderer → `appsrc` → per-camera and mosaic H.265 channels ([README](rust/sim-streamer/README.md)) |
 | [web/webrtc/webrtc_gateway.py](web/webrtc/webrtc_gateway.py) | WebRTC gateway (`webrtcsink` + built-in signalling and web server) |
 | [web/webrtc/www/index.html](web/webrtc/www/index.html) | WebRTC viewer page |
