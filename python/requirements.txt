@@ -1,0 +1,3 @@
+gstreamer-bundle>=1.28
+opencv-python
+numpy

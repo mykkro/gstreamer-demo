@@ -1,0 +1,15 @@
+[package]
+name = "gst-demo"
+version = "0.1.0"
+edition = "2024"
+description = "GStreamer H.265 producer / receiver demo (Rust port of the Python scripts)"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+gst = { package = "gstreamer", version = "0.25" }
+gst-video = { package = "gstreamer-video", version = "0.25" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
