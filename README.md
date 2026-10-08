@@ -276,3 +276,11 @@ Static content (screens, cameras) needs much less than motion-heavy content.
 - **Debug logging:** `$env:GST_DEBUG="3"` (or `"tcpserversink:5"`) before starting a script.
 - **High CPU on the producer:** you're probably on `x265enc`. Try `--encoder nvenc`/`qsv`/`amf`, lower the
   channel list, or use `--channels 720p30:2000`.
+
+## License
+
+This demo is released under the [MIT License](LICENSE).
+
+GStreamer itself is LGPL. Some plugins used here are GPL (`x265enc`) or may be patent-encumbered (H.265/HEVC).
+The MIT license covers only this demo's code. Check the licensing and patent situation of the GStreamer
+components and codecs before you ship a product built on them.
