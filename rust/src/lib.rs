@@ -10,6 +10,7 @@
 //!   -> {"cmd": "stats"}   <- {"ok": true, "clients": {"720p30": 2, ...}}
 
 pub mod atlas;
+pub mod streams;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};

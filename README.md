@@ -14,7 +14,7 @@ gstreamer-demo/
 ├── python/            producer.py, receiver.py, common.py, requirements.txt
 ├── rust/              Cargo workspace: src/lib.rs, src/bin/{producer,receiver}.rs, env.cmd/env.ps1
 │   ├── sim-streamer/  headless 3D scene (raw wgpu) → 6 vehicle cameras streamed as H.265 channels
-│   └── bevy-streamer/ the same with the Bevy 0.18 engine (render-to-texture + GPU readback)
+│   └── bevy-streamer/ Bevy 0.18: one render-target image per camera, own resolution/rate, renders only when watched
 ├── web/webrtc/        browser viewing via WebRTC (Python gateway + page)
 ├── web/h265-webcodecs/ browser viewing of the original H.265 via Node.js + WebCodecs
 └── .venv/             Python virtual env (created in step 1)
@@ -330,8 +330,9 @@ Static content (screens, cameras) needs much less than motion-heavy content.
 | [rust/src/bin/producer.rs](rust/src/bin/producer.rs) | Rust port of the producer (same pipeline and protocol) |
 | [rust/src/bin/receiver.rs](rust/src/bin/receiver.rs) | Rust receiver, native GStreamer video window |
 | [rust/src/lib.rs](rust/src/lib.rs) | shared: `Channel` type, control protocol (client and server), encoder settings, encode-on-demand channel wiring |
-| [rust/src/atlas.rs](rust/src/atlas.rs) | shared, engine-agnostic: RGBA camera atlas → mosaic and per-camera H.265 channels |
-| [rust/bevy-streamer/](rust/bevy-streamer/) | Bevy 0.18 app: cameras → `RenderTarget::Image` atlas with viewports → `Readback` → the same atlas streamer ([README](rust/bevy-streamer/README.md)) |
+| [rust/src/atlas.rs](rust/src/atlas.rs) | shared, engine-agnostic: RGBA camera atlas → mosaic and per-camera H.265 channels (sim-streamer) |
+| [rust/src/streams.rs](rust/src/streams.rs) | shared, engine-agnostic: one `appsrc` per camera (own size/rate) → H.265 channels, compositor mosaic, `demand()` for on-demand rendering (bevy-streamer) |
+| [rust/bevy-streamer/](rust/bevy-streamer/) | Bevy 0.18 app: each camera → its own `RenderTarget::Image` → `Readback` → its own `appsrc`; per-camera resolution and rate; unwatched cameras aren't rendered ([README](rust/bevy-streamer/README.md)) |
 | [rust/sim-streamer/](rust/sim-streamer/) | headless `wgpu` renderer → `appsrc` → per-camera and mosaic H.265 channels ([README](rust/sim-streamer/README.md)) |
 | [web/webrtc/webrtc_gateway.py](web/webrtc/webrtc_gateway.py) | WebRTC gateway (`webrtcsink` + built-in signalling and web server) |
 | [web/webrtc/www/index.html](web/webrtc/www/index.html) | WebRTC viewer page |

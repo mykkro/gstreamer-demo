@@ -187,6 +187,9 @@ pub struct CameraDef {
     pub transform: fn() -> Transform,
     /// vertical field of view (radians)
     pub vfov: f32,
+    /// default stream "WxH@fps:kbps" (override with --camera name=...); each camera has its own
+    /// resolution and rate because each renders into its own image
+    pub stream: &'static str,
 }
 
 /// 90° horizontal FOV at 16:9 -> ~58.7° vertical, so front/rear/left/right cover 360°
@@ -197,30 +200,36 @@ pub const CAMERAS: [CameraDef; 6] = [
         name: "front",
         transform: || Transform::from_xyz(0.0, 1.4, -2.3).looking_to(Vec3::new(0.0, -0.05, -1.0), Vec3::Y),
         vfov: SURROUND_VFOV,
+        stream: "1280x720@30:2500",
     },
     CameraDef {
         name: "rear",
         transform: || Transform::from_xyz(0.0, 1.4, 2.3).looking_to(Vec3::new(0.0, -0.05, 1.0), Vec3::Y),
         vfov: SURROUND_VFOV,
+        stream: "640x360@15:700",
     },
     CameraDef {
         name: "left",
         transform: || Transform::from_xyz(-1.1, 1.5, 0.0).looking_to(Vec3::new(-1.0, -0.05, 0.0), Vec3::Y),
         vfov: SURROUND_VFOV,
+        stream: "640x360@15:700",
     },
     CameraDef {
         name: "right",
         transform: || Transform::from_xyz(1.1, 1.5, 0.0).looking_to(Vec3::new(1.0, -0.05, 0.0), Vec3::Y),
         vfov: SURROUND_VFOV,
+        stream: "640x360@15:700",
     },
     CameraDef {
         name: "chase",
         transform: || Transform::from_xyz(0.0, 5.0, 12.0).looking_at(Vec3::new(0.0, 1.5, -4.0), Vec3::Y),
         vfov: 0.9,
+        stream: "960x540@30:1800",
     },
     CameraDef {
         name: "top",
         transform: || Transform::from_xyz(0.0, 55.0, 5.0).looking_at(Vec3::new(0.0, 0.0, -18.0), Vec3::Y),
         vfov: 0.9,
+        stream: "512x512@10:600",
     },
 ];

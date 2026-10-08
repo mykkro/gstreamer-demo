@@ -1,48 +1,88 @@
 # bevy-streamer: streaming camera views from a Bevy 0.18 game
 
-This is the same idea as [sim-streamer](../sim-streamer/) (a car with six cameras driving through a
-synthetic city, streamed as H.265 channels), but the world is a normal **Bevy 0.18.1** app: ECS entities,
-PBR materials, a shadow-casting sun, fog, and cameras parented to the car.
+The same idea as [sim-streamer](../sim-streamer/), a car with six cameras driving through a synthetic city,
+but built as a normal **Bevy 0.18.1** app: ECS entities, PBR materials, a shadow-casting sun, fog, and a
+camera rig parented to the car. Compared with sim-streamer's single atlas image:
 
-![mosaic channel](docs/mosaic.png)
+- **Each camera renders into its own image**, with its own resolution and frame rate, and is streamed as its
+  own H.265 channel.
+- **Unwatched cameras aren't rendered at all.** A camera only renders while someone subscribes to its channel
+  or to the mosaic.
+- A **mosaic** channel is still offered. GStreamer's `compositor` builds it from the individual camera streams.
 
-![chase channel](docs/chase.png)
+![mosaic channel: cameras with different resolutions and rates, composited by GStreamer](docs/mosaic.png)
+
+![front channel at 1280x720](docs/front.png)
 
 ## How it's done in Bevy
 
-Yes, you render to a texture. Bevy has everything built in, with no custom render-graph node:
+You render to a texture. Bevy has everything built in, with no custom render-graph node:
 
 | step | Bevy API | in this demo |
 |---|---|---|
-| 1. run **headless** | `WindowPlugin { primary_window: None, exit_condition: DontExit }`, `.disable::<WinitPlugin>()`, `ScheduleRunnerPlugin::run_loop(1/fps)` | the app ticks at the stream frame rate with no window |
-| 2. **render target image** | `Image::new_target_texture(w, h, Rgba8UnormSrgb, None)` + `TextureUsages::COPY_SRC` | one *atlas* image, 1920×720 |
-| 3. **cameras → image** | `RenderTarget::Image(handle.into())` component on each `Camera3d` | all six cameras target the same image |
-| 4. **one tile per camera** | `Camera { viewport: Some(Viewport { physical_position, physical_size, .. }), order: i, .. }` | Bevy's split-screen mechanism, aimed at a texture instead of a window |
-| 5. **GPU → CPU** | `commands.spawn(Readback::texture(handle)).observe(\|ev: On<ReadbackComplete>\| …)` | Bevy copies the image to the CPU every frame and calls the observer with the bytes |
-| 6. **→ GStreamer** | observer pushes the bytes into `appsrc` | shared `gst_demo::atlas` (exactly what sim-streamer uses) encodes the mosaic and per-camera crops |
+| 1. run **headless** | `WindowPlugin { primary_window: None, exit_condition: DontExit }`, `.disable::<WinitPlugin>()`, `ScheduleRunnerPlugin::run_loop(1/fps)` | the app ticks at the *fastest* camera's rate |
+| 2. **one render-target image per camera** | `Image::new_target_texture(w, h, Rgba8UnormSrgb, None)` + `TextureUsages::COPY_SRC` | each camera has its own size, e.g. front 1280×720, top 512×512 |
+| 3. **camera → its image** | `RenderTarget::Image(handle.into())` component on the `Camera3d` | six cameras, children of the car entity |
+| 4. **GPU → CPU** | entity with `Readback::texture(handle)` + `.observe(\|ev: On<ReadbackComplete>\| …)` | the observer pushes the bytes into *that camera's* `appsrc` |
+| 5. **render only what's needed** | `Camera::is_active` + inserting/removing the `Readback` component each tick | see below |
+| 6. **→ GStreamer** | `gst_demo::streams::CameraStreams` | one `appsrc` → H.265 channel per camera, plus the compositor mosaic |
 
-Other Bevy details worth knowing:
+### Per-camera rates and on-demand rendering
 
-- **Deterministic time.** `TimeUpdateStrategy::ManualDuration(1/fps)` makes `Time` advance exactly one
-  video frame per update, so the simulation doesn't depend on wall-clock jitter. `ScheduleRunnerPlugin`
-  does the real-time pacing.
-- **Camera rig** = children of the car entity (`commands.entity(ego).add_child(camera)`). Bevy's transform
-  propagation moves all six cameras with the car. Camera poses are in the car's local frame, where Bevy's
-  forward is −Z.
-- **Readback rows** are padded to 256 bytes. With a camera width that is a multiple of 64 there is no
-  padding; the observer also strips it if present.
-- **Readback is asynchronous.** The bytes arrive a frame or two after rendering, which is fine for
-  streaming. For exact per-frame metadata (pose, sim time), pair frames with a frame counter.
+Every tick the `schedule_cameras` system decides, for each camera, whether it renders on this tick:
+
+```
+wanted = own channel has subscribers || mosaic has subscribers   // CameraStreams::demand()
+due    = tick % (app_fps / camera_fps) == 0                       // 15 fps camera: every 2nd tick of 30
+active = wanted && due
+camera.is_active = active
+if active { insert Readback::texture(image) } else { remove::<Readback>() }
+```
+
+- **Subscriber counts** come from the `tcpserversink`s (`num-handles`). `demand()` also opens and closes the
+  mosaic feeds, so nothing is scaled or composited for a mosaic nobody watches.
+- **Readback only on render ticks.** A `Readback` component reads its texture *every* frame. If it stayed
+  attached while the camera was inactive, the stale image would be streamed again. Attaching it only on ticks
+  where the camera renders makes sure each rendered frame is streamed exactly once. Camera and readback are
+  extracted to the render world in the same frame, so they stay consistent.
+- **What idle costs:** an inactive camera costs nothing in the render world: no culling, no shadow cascades,
+  no draw calls, no readback. The simulation itself keeps running.
+
+Measured with the default rig (GTX 1050):
+
+| who is watching | cameras rendering (frames/s rendered and streamed) |
+|---|---|
+| nobody | none (`front idle \| rear idle \| … \| top idle`) |
+| `rear` + `top` | rear 14.7/15, top 9.7/10, the other four idle |
+| `mosaic` | front 29.6/30, rear/left/right 14.8/15, chase 29.6/30, top 9.8/10; mosaic arrives at 29.3 fps |
+
+The console prints this table every 5 s.
+
+### The mosaic with mixed resolutions and rates
+
+Each camera's `tee` has a second branch: `valve → videoscale → tile size → compositor`. The live
+`compositor` (`force-live=true ignore-inactive-pads=true`) produces mosaic frames at the app rate from the
+latest frame of each camera. Slower cameras simply repeat, and cameras with a different aspect ratio (the
+square `top` view) are letterboxed.
+
+### Other Bevy details
+
+- **Deterministic time.** `TimeUpdateStrategy::ManualDuration(1/app_fps)` makes `Time` advance exactly one
+  tick per update. `ScheduleRunnerPlugin` does the real-time pacing.
+- **Camera rig** = children of the car entity (`commands.entity(ego).add_child(camera)`). Poses are in the car's
+  local frame, where Bevy's forward is −Z.
+- **Readback rows** are padded to 256 bytes. Camera widths must be multiples of 64, so there is no padding; the
+  observer would strip it anyway.
+- **Readback is asynchronous.** The bytes arrive a frame or two after rendering, which is fine for streaming.
+  For exact per-frame metadata (pose, sim time), pair frames with a tick counter.
 - **Ctrl+C:** Bevy's `TerminalCtrlCHandlerPlugin` is disabled because the `ctrlc` crate allows only one
-  handler per process. The GStreamer thread handles Ctrl+C, then tells Bevy to exit with `AppExit`.
-- **Threads:** Bevy owns the main thread, and the GStreamer/GLib main loop (bus, encode-on-demand signals)
-  runs on a second thread.
+  handler. The GStreamer thread handles Ctrl+C and tells Bevy to exit (`AppExit`).
+- **Threads:** Bevy owns the main thread, and the GStreamer/GLib main loop runs on a second thread.
 
 ## Run
 
 Prerequisites are the same as the other Rust demos (GStreamer MSVC SDK *devel*, `env.cmd` / `env.ps1`).
-Bevy is **not** in the workspace's default members, because its first build takes several minutes, so
-build it explicitly:
+Bevy is **not** in the workspace's default members because its first build takes several minutes:
 
 ```bat
 cd rust
@@ -51,50 +91,60 @@ cargo build --release -p bevy-streamer      :: first build ≈ 5 min, later ones
 target\release\bevy-streamer.exe
 ```
 
-Watch it like any producer:
+Default channels:
 
-```bat
-target\release\receiver.exe --channel mosaic
-```
+| channel | resolution | fps | kbps | port |
+|---|---|---|---|---|
+| `mosaic` | 1920×720 (3×2 tiles of 640×360) | 30 | 5000 | 5001 |
+| `front` | 1280×720 | 30 | 2500 | 5002 |
+| `rear`, `left`, `right` | 640×360 | 15 | 700 | 5003–5005 |
+| `chase` | 960×540 | 30 | 1800 | 5006 |
+| `top` | 512×512 | 10 | 600 | 5007 |
 
-Or in the browser: `node server.js` in `web/h265-webcodecs`, then <http://localhost:8080/?channel=chase>.
+Watch it like any producer: `target\release\receiver.exe --channel front`, or in the browser with
+`node server.js` in `web/h265-webcodecs`, then <http://localhost:8080/?channel=mosaic>.
 
-Options: everything from sim-streamer (`--cam-width/--cam-height/--cols/--fps/--cam-kbps/--mosaic-kbps/
---encoder/--gop-seconds/--always-encode/--base-port/--control-port`) plus `--no-shadows`.
+Options:
+
+| option | meaning |
+|---|---|
+| `--camera NAME=WxH@FPS[:KBPS]` (repeatable) | override a camera, e.g. `--camera front=1920x1080@30:4000 --camera top=256x256@5`. Width must be a multiple of 64, and every rate must divide the fastest one |
+| `--no-mosaic` | don't offer the mosaic, so cameras render only for their own subscribers |
+| `--mosaic-tile 640x360`, `--mosaic-kbps 5000` | mosaic layout and bitrate (3 tiles per row) |
+| `--no-shadows` | cheaper rendering (every camera renders its own shadow cascades) |
+| `--always-encode` | render and encode everything even without subscribers |
+| `--host`, `--control-port`, `--base-port`, `--encoder`, `--gop-seconds` | as for the other producers |
 
 Both demos default to ports 5000–5007. To run sim-streamer and bevy-streamer at the same time, give one of
-them other ports, e.g. `--control-port 6000 --base-port 6001`, and point receivers at them with
-`--control-port 6000`.
+them other ports (`--control-port 6000 --base-port 6001`) and point receivers at them with `--control-port 6000`.
 
-## Measured (GTX 1050, Ryzen 5 3600)
+## sim-streamer vs. bevy-streamer
 
-| | sim-streamer (raw wgpu) | bevy-streamer |
+| | sim-streamer (raw wgpu) | bevy-streamer (Bevy 0.18) |
 |---|---|---|
-| scene | flat-shaded boxes, fake fog | PBR, 2-cascade sun shadows per camera, fog, MSAA |
-| streamed frame rate | 30 fps | 29.5 fps (with the default 30 fps target) |
-| code size | ~600 lines (renderer included) | ~350 lines (scene + glue) |
-| build time | seconds | minutes (first build) |
-
-The point of comparison: a raw `wgpu` renderer gives full control (synchronous readback, exact timing,
-zero-copy later). An engine like Bevy gives you a real scene graph, materials, shadows, assets, and
-physics plugins for little code. The streaming side is identical: both push an RGBA atlas into
-`gst_demo::atlas::AtlasStream`.
+| scene | flat-shaded instanced boxes, fake fog | PBR, sun with shadow cascades, fog, MSAA |
+| images | one atlas, one readback for all cameras | one image and one readback per camera |
+| per-camera resolution and rate | no (same tile size and rate) | yes |
+| unwatched cameras | still rendered (only encoding stops) | not rendered |
+| mosaic | the atlas itself | GStreamer `compositor` |
+| GStreamer side | `gst_demo::atlas` | `gst_demo::streams` |
+| code size | ~600 lines incl. renderer | ~500 lines (scene + glue) |
+| build time | seconds | minutes the first time |
 
 ## Files
 
 | file | what |
 |---|---|
-| [src/main.rs](src/main.rs) | headless app setup, atlas image, camera rig with viewports, `Readback` observer → `appsrc`, exit handling |
-| [src/scene.rs](src/scene.rs) | world (road, city, park, traffic, drones, lighting), `Lane` driving system, the six `CameraDef`s |
-| [../src/atlas.rs](../src/atlas.rs) | shared GStreamer side: atlas → mosaic + cropped per-camera H.265 channels, control server |
+| [src/main.rs](src/main.rs) | headless app, per-camera images and `Readback` observers, `schedule_cameras` (demand + rate), reporting, exit handling |
+| [src/scene.rs](src/scene.rs) | world (road, city, park, traffic, drones, lighting), `Lane` driving system, the six `CameraDef`s with their default streams |
+| [../src/streams.rs](../src/streams.rs) | shared GStreamer side: an `appsrc` per camera → H.265 channels, compositor mosaic, `demand()` |
 
-## Going further in Bevy
+## Going further
 
-- **One image per camera** instead of an atlas: give each camera its own `RenderTarget::Image` and
-  `Readback`, and push into one `appsrc` per camera. This allows different resolutions and rates per camera.
-- **Skip unwatched cameras:** set `Camera::is_active = false` when the control server reports 0 subscribers
-  for that channel.
-- **Zero-copy:** instead of `Readback`, a render-graph node can hand the `GpuImage` texture to
+- **Zero-copy:** instead of `Readback`, a render-graph node can hand the camera's `GpuImage` texture to
   NVENC through D3D12/Vulkan interop.
-- **Depth or segmentation** for ML: add `DepthPrepass` / custom passes and read them back as raw buffers
-  (not video), as discussed in the [sim-streamer README](../sim-streamer/README.md#is-this-the-right-approach).
+- **Depth or segmentation** for ML: add `DepthPrepass` or custom passes and read them back as raw buffers
+  (not video). See the [sim-streamer README](../sim-streamer/README.md#is-this-the-right-approach).
+- **Pause the simulation** when nobody watches anything at all, if the world doesn't need to keep running.
+- **Dynamic cameras:** cameras can be added at runtime. The GStreamer side would need a new `appsrc` branch
+  (pipelines can be extended while playing) and a control-protocol update.

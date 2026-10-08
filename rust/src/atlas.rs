@@ -13,19 +13,14 @@
 use anyhow::Result;
 use gst::prelude::*;
 
-use crate::{Channel, DEFAULT_CONTROL_PORT, channel_branch, pick_encoder, spawn_control_server, wire_channel};
+use crate::streams::NetArgs;
+use crate::{Channel, channel_branch, pick_encoder, spawn_control_server, wire_channel};
 
 /// Command-line options shared by the atlas streamers (use with `#[command(flatten)]`).
 #[derive(clap::Args, Debug, Clone)]
 pub struct AtlasArgs {
-    /// Interface to listen on
-    #[arg(long, default_value = "0.0.0.0")]
-    pub host: String,
-    #[arg(long, default_value_t = DEFAULT_CONTROL_PORT)]
-    pub control_port: u16,
-    /// First channel port (mosaic); cameras use the following ports
-    #[arg(long, default_value_t = 5001)]
-    pub base_port: u16,
+    #[command(flatten)]
+    pub net: NetArgs,
     /// Width of one camera image (multiple of 64: GPU copies need 256-byte rows)
     #[arg(long, default_value_t = 640)]
     pub cam_width: u32,
@@ -43,14 +38,6 @@ pub struct AtlasArgs {
     /// Bitrate of the mosaic channel (kbps)
     #[arg(long, default_value_t = 5000)]
     pub mosaic_kbps: u32,
-    /// auto | x265 | nvenc | qsv | amf | mf | <gst element name>
-    #[arg(long, default_value = "auto")]
-    pub encoder: String,
-    #[arg(long, default_value_t = 1)]
-    pub gop_seconds: u32,
-    /// Encode all channels even with no subscribers
-    #[arg(long)]
-    pub always_encode: bool,
 }
 
 impl AtlasArgs {
@@ -85,14 +72,14 @@ impl AtlasStream {
             (args.cam_width * 4) % 256 == 0,
             "--cam-width must be a multiple of 64 (GPU texture copies need 256-byte aligned rows)"
         );
-        let encoder = pick_encoder(&args.encoder)?;
+        let encoder = pick_encoder(&args.net.encoder)?;
         let mk = |i: usize, id: &str, w: u32, h: u32, kbps: u32| Channel {
             id: id.into(),
             width: w,
             height: h,
             fps: args.fps,
             bitrate_kbps: kbps,
-            port: args.base_port + i as u16,
+            port: args.net.base_port + i as u16,
             codec: "h265".into(),
             container: "mpegts".into(),
             transport: "tcp".into(),
@@ -111,7 +98,7 @@ impl AtlasStream {
              tee name=t allow-not-linked=true \
              t. ! queue max-size-buffers=2 leaky=downstream ! {}",
             args.fps,
-            channel_branch(&channels[0], "", &args.host)
+            channel_branch(&channels[0], "", &args.net.host)
         );
         for (i, ch) in channels.iter().enumerate().skip(1) {
             let (x, y) = args.tile_origin(i - 1);
@@ -122,11 +109,11 @@ impl AtlasStream {
                 height - y - args.cam_height,
                 ch.id
             );
-            desc += &format!(" t. ! queue max-size-buffers=2 leaky=downstream ! {}", channel_branch(ch, &pre, &args.host));
+            desc += &format!(" t. ! queue max-size-buffers=2 leaky=downstream ! {}", channel_branch(ch, &pre, &args.net.host));
         }
         let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Bin>().unwrap();
         for ch in &channels {
-            wire_channel(&pipeline, ch, args.gop_seconds, args.always_encode);
+            wire_channel(&pipeline, ch, args.net.gop_seconds, args.net.always_encode);
         }
         let appsrc = pipeline.by_name("src").unwrap().downcast::<gst_app::AppSrc>().unwrap();
         // never block the renderer: keep at most 2 frames queued, drop the oldest
@@ -137,7 +124,7 @@ impl AtlasStream {
             .iter()
             .map(|c| (c.id.clone(), pipeline.by_name(&format!("sink_{}", c.id)).unwrap()))
             .collect();
-        spawn_control_server(&args.host, args.control_port, source, &channels, sinks)?;
+        spawn_control_server(&args.net.host, args.net.control_port, source, &channels, sinks)?;
 
         println!("Source : {source}");
         println!(
@@ -148,7 +135,7 @@ impl AtlasStream {
             args.fps
         );
         println!("Encoder: {encoder}");
-        println!("Control: tcp://{}:{}", args.host, args.control_port);
+        println!("Control: tcp://{}:{}", args.net.host, args.net.control_port);
         for ch in &channels {
             println!("  {:>7}  {}x{}  {} kbps  -> tcp port {}", ch.id, ch.width, ch.height, ch.bitrate_kbps, ch.port);
         }
